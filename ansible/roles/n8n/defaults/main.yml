@@ -1,0 +1,15 @@
+---
+# All of these are expected to be overridden via -e from the CI pipeline
+# (sourced from GitHub secrets). Defaults here just keep `ansible-playbook
+# --syntax-check` / local dry runs from blowing up.
+n8n_domain: "" # empty = auto HTTPS via <ip>.sslip.io instead of a real domain
+public_ip: "0.0.0.0"
+n8n_owner_email: "admin@example.com"
+n8n_owner_first_name: "Admin"
+n8n_owner_last_name: "User"
+# Placeholder bcrypt hash of "changeme" — only used for --syntax-check/local dry
+# runs; CI always overrides this with a hash of the real N8N_OWNER_PASSWORD secret.
+n8n_owner_password_hash: "$2b$12$okFpuxYCSmPZbvwjwJclbeYCTVvUBJLShdaH1lmRVilHXq5gnnx0e"
+n8n_encryption_key: "changeme-32-char-minimum-string"
+postgres_password: "changeme"
+n8n_install_dir: /opt/n8n

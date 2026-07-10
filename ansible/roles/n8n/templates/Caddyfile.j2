@@ -1,0 +1,9 @@
+# Managed by Ansible — do not edit by hand.
+#
+# CADDY_SITE_ADDRESS is always a real hostname (N8N_DOMAIN if set, otherwise a
+# free <ip>.sslip.io hostname — see env.j2), so Caddy always auto-provisions and
+# renews a Let's Encrypt cert and serves HTTPS.
+
+{{ '{$CADDY_SITE_ADDRESS}' }} {
+	reverse_proxy n8n:5678
+}

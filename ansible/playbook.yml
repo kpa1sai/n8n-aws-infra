@@ -1,0 +1,9 @@
+---
+- name: Configure n8n server
+  hosts: n8n
+  become: true
+  gather_facts: true
+
+  roles:
+    - docker
+    - n8n

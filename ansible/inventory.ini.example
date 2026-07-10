@@ -1,0 +1,6 @@
+# CI generates the real inventory.ini at runtime (see .github/workflows/deploy.yml)
+# from the Terraform `public_ip` output. This file is just a reference for
+# running Ansible manually against an already-provisioned box.
+
+[n8n]
+n8n-server ansible_host=203.0.113.5 ansible_user=ubuntu ansible_ssh_private_key_file=./n8n_key.pem

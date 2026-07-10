@@ -1,0 +1,238 @@
+name: Deploy n8n
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "ansible/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  id-token: write # required for OIDC -> AWS
+  contents: read
+
+concurrency:
+  group: n8n-infra-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight — check required secrets are set
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_DYNAMODB_TABLE: ${{ secrets.TF_STATE_DYNAMODB_TABLE }}
+          N8N_OWNER_EMAIL: ${{ secrets.N8N_OWNER_EMAIL }}
+          N8N_OWNER_FIRST_NAME: ${{ secrets.N8N_OWNER_FIRST_NAME }}
+          N8N_OWNER_LAST_NAME: ${{ secrets.N8N_OWNER_LAST_NAME }}
+          N8N_OWNER_PASSWORD: ${{ secrets.N8N_OWNER_PASSWORD }}
+          N8N_ENCRYPTION_KEY: ${{ secrets.N8N_ENCRYPTION_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SSH_ALLOWED_CIDR: ${{ secrets.SSH_ALLOWED_CIDR }}
+        run: |
+          missing=()
+          [ -z "$AWS_ROLE_ARN" ] && missing+=("AWS_ROLE_ARN")
+          [ -z "$AWS_REGION" ] && missing+=("AWS_REGION")
+          [ -z "$TF_STATE_BUCKET" ] && missing+=("TF_STATE_BUCKET")
+          [ -z "$TF_STATE_DYNAMODB_TABLE" ] && missing+=("TF_STATE_DYNAMODB_TABLE")
+          [ -z "$N8N_OWNER_EMAIL" ] && missing+=("N8N_OWNER_EMAIL")
+          [ -z "$N8N_OWNER_FIRST_NAME" ] && missing+=("N8N_OWNER_FIRST_NAME")
+          [ -z "$N8N_OWNER_LAST_NAME" ] && missing+=("N8N_OWNER_LAST_NAME")
+          [ -z "$N8N_OWNER_PASSWORD" ] && missing+=("N8N_OWNER_PASSWORD")
+          [ -z "$N8N_ENCRYPTION_KEY" ] && missing+=("N8N_ENCRYPTION_KEY")
+          [ -z "$POSTGRES_PASSWORD" ] && missing+=("POSTGRES_PASSWORD")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required repo secrets: ${missing[*]}"
+            echo "## Deploy blocked — missing secrets" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The following required secrets are not set:" >> "$GITHUB_STEP_SUMMARY"
+            for m in "${missing[@]}"; do echo "- \`$m\`" >> "$GITHUB_STEP_SUMMARY"; done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Add them under Settings → Secrets and variables → Actions, then re-run. See the README setup table for what each one should contain." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if [ -z "$SSH_ALLOWED_CIDR" ]; then
+            echo "::warning::SSH_ALLOWED_CIDR is not set — SSH (port 22) will be open to 0.0.0.0/0. Set this secret to your IP/32 to restrict it."
+          fi
+
+          echo "All required secrets present."
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=n8n-server/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_DYNAMODB_TABLE }}"
+
+      - name: Terraform plan
+        working-directory: terraform
+        run: |
+          terraform plan -out=tfplan \
+            -var="aws_region=${{ secrets.AWS_REGION }}" \
+            -var="allowed_ssh_cidr=${{ secrets.SSH_ALLOWED_CIDR != '' && secrets.SSH_ALLOWED_CIDR || '0.0.0.0/0' }}"
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Capture Terraform outputs
+        id: tf
+        working-directory: terraform
+        run: |
+          IP="$(terraform output -raw public_ip)"
+          echo "public_ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "key_secret_name=$(terraform output -raw ssh_private_key_secret_name)" >> "$GITHUB_OUTPUT"
+
+          DOMAIN="${{ secrets.N8N_DOMAIN }}"
+          if [ -n "$DOMAIN" ]; then
+            EFFECTIVE_URL="https://$DOMAIN"
+          else
+            IP_DASHED="$(echo "$IP" | tr '.' '-')"
+            EFFECTIVE_URL="https://${IP_DASHED}.sslip.io"
+          fi
+          echo "effective_url=$EFFECTIVE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch SSH private key from Secrets Manager
+        run: |
+          mkdir -p ~/.ssh
+          aws secretsmanager get-secret-value \
+            --secret-id "${{ steps.tf.outputs.key_secret_name }}" \
+            --query SecretString --output text > ~/.ssh/n8n_key.pem
+          chmod 600 ~/.ssh/n8n_key.pem
+
+      - name: Wait for SSH to be reachable
+        run: |
+          IP="${{ steps.tf.outputs.public_ip }}"
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/n8n_key.pem ubuntu@"$IP" 'echo ready' 2>/dev/null; then
+              echo "SSH is up"
+              break
+            fi
+            echo "Waiting for SSH... ($i/30)"
+            sleep 10
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        run: |
+          pip install --upgrade pip
+          pip install ansible bcrypt
+
+      - name: Generate n8n owner password hash
+        id: owner_hash
+        env:
+          PW: ${{ secrets.N8N_OWNER_PASSWORD }}
+        run: |
+          HASH=$(python3 -c "import bcrypt, os; print(bcrypt.hashpw(os.environ['PW'].encode(), bcrypt.gensalt()).decode())")
+          echo "::add-mask::$HASH"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate inventory
+        working-directory: ansible
+        run: |
+          cat > inventory.ini <<EOF
+          [n8n]
+          n8n-server ansible_host=${{ steps.tf.outputs.public_ip }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/n8n_key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          EOF
+
+      - name: Write Ansible extra-vars file (kept out of process args/logs)
+        working-directory: ansible
+        run: |
+          umask 077
+          cat > extra-vars.yml <<EOF
+          public_ip: "${{ steps.tf.outputs.public_ip }}"
+          n8n_domain: "${{ secrets.N8N_DOMAIN }}"
+          n8n_owner_email: "${{ secrets.N8N_OWNER_EMAIL }}"
+          n8n_owner_first_name: "${{ secrets.N8N_OWNER_FIRST_NAME }}"
+          n8n_owner_last_name: "${{ secrets.N8N_OWNER_LAST_NAME }}"
+          n8n_owner_password_hash: "${{ steps.owner_hash.outputs.hash }}"
+          n8n_encryption_key: "${{ secrets.N8N_ENCRYPTION_KEY }}"
+          postgres_password: "${{ secrets.POSTGRES_PASSWORD }}"
+          EOF
+
+      - name: Run Ansible playbook
+        working-directory: ansible
+        run: ansible-playbook playbook.yml -e @extra-vars.yml
+
+      - name: Health check
+        id: health
+        continue-on-error: true
+        run: |
+          URL="${{ steps.tf.outputs.effective_url }}"
+          for i in $(seq 1 15); do
+            if curl -k -sS -o /dev/null -m 10 "$URL"; then
+              echo "n8n is responding at $URL"
+              exit 0
+            fi
+            echo "Waiting for n8n to respond... ($i/15)"
+            sleep 10
+          done
+          echo "::error::n8n did not respond at $URL after 15 attempts."
+          exit 1
+
+      - name: Dump remote logs on health check failure
+        if: steps.health.outcome == 'failure'
+        run: |
+          IP="${{ steps.tf.outputs.public_ip }}"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/n8n_key.pem ubuntu@"$IP" \
+            'cd /opt/n8n && sudo docker compose logs --tail=200' || true
+
+      - name: Print access URL
+        if: always()
+        run: |
+          IP="${{ steps.tf.outputs.public_ip }}"
+          URL="${{ steps.tf.outputs.effective_url }}"
+          {
+            if [ "${{ steps.health.outcome }}" == "success" ]; then
+              echo "## n8n deployed"
+              echo ""
+              echo "**URL:** $URL"
+              echo "**Public IP:** $IP"
+              echo ""
+              echo "Log in with the N8N_OWNER_EMAIL / N8N_OWNER_PASSWORD repo secrets — the owner account is pre-provisioned, so there's no public setup screen."
+            else
+              echo "## n8n deploy finished, but the health check failed"
+              echo ""
+              echo "**Expected URL:** $URL"
+              echo "**Public IP:** $IP"
+              echo ""
+              echo "Infrastructure and Ansible both completed, but n8n isn't responding yet. Check the 'Dump remote logs on health check failure' step output above, or wait a minute and re-run the Deploy workflow (it's idempotent)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job if health check failed
+        if: steps.health.outcome == 'failure'
+        run: exit 1
+
+      - name: Clean up local secrets
+        if: always()
+        run: |
+          rm -f ~/.ssh/n8n_key.pem
+          rm -f ansible/extra-vars.yml ansible/inventory.ini
