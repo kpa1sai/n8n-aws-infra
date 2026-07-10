@@ -69,15 +69,19 @@ Resources:
   # existing provider's ARN instead.
   # ---------------------------------------------------------------------------
 
+  # ThumbprintList is intentionally omitted: AWS added GitHub to its trusted
+  # root CA chain, so IAM validates the OIDC provider's certificate chain
+  # directly and no longer needs (or benefits from) a pinned thumbprint. This
+  # also avoids the failure mode where a hand-copied thumbprint goes stale or
+  # is mistyped (an earlier version of this template had a 39-character
+  # thumbprint — one hex digit short — which CloudFormation's early property
+  # validation correctly rejected).
   GithubOidcProvider:
     Type: AWS::IAM::OIDCProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
         - sts.amazonaws.com
-      ThumbprintList:
-        - 6938fd4d98bab03faadb97b34396831e3780aea
-        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
 
   GithubActionsDeployRole:
     Type: AWS::IAM::Role
