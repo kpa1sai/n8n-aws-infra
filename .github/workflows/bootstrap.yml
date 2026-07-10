@@ -56,7 +56,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_BOOTSTRAP_SECRET_ACCESS_KEY }}
           aws-region: ${{ inputs.aws_region }}
 
+      - name: Clean up a stuck stack from a previous failed attempt
+        run: |
+          STATUS=$(aws cloudformation describe-stacks --stack-name n8n-bootstrap \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "Current stack status: $STATUS"
+          if [ "$STATUS" == "REVIEW_IN_PROGRESS" ]; then
+            echo "Stack is stuck in REVIEW_IN_PROGRESS from a changeset that failed validation before any resources were created — deleting it so this run starts clean."
+            aws cloudformation delete-stack --stack-name n8n-bootstrap
+            aws cloudformation wait stack-delete-complete --stack-name n8n-bootstrap
+          fi
+
       - name: Deploy bootstrap CloudFormation stack
+        id: deploy
+        continue-on-error: true
         run: |
           aws cloudformation deploy \
             --template-file bootstrap/template.yaml \
@@ -66,6 +79,29 @@ jobs:
               GitHubOrg="${{ steps.repo.outputs.org }}" \
               GitHubRepo="${{ steps.repo.outputs.repo }}" \
               AllowedBranch="${{ inputs.allowed_branch }}"
+
+      - name: Diagnose failed changeset/stack
+        if: steps.deploy.outcome == 'failure'
+        run: |
+          echo "## Bootstrap failed — diagnostic detail" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          CS_NAME=$(aws cloudformation list-change-sets --stack-name n8n-bootstrap \
+            --query "Summaries | sort_by(@, &CreationTime)[-1].ChangeSetName" --output text 2>/dev/null || echo "")
+          if [ -n "$CS_NAME" ] && [ "$CS_NAME" != "None" ]; then
+            echo "--- Change set: $CS_NAME ---" | tee -a "$GITHUB_STEP_SUMMARY"
+            aws cloudformation describe-change-set --stack-name n8n-bootstrap --change-set-name "$CS_NAME" \
+              --query "{Status:Status,StatusReason:StatusReason}" --output json | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "--- Recent stack events ---" | tee -a "$GITHUB_STEP_SUMMARY"
+          aws cloudformation describe-stack-events --stack-name n8n-bootstrap \
+            --query "StackEvents[?contains(ResourceStatus, 'FAILED')].{Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}" \
+            --output table 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || echo "(no stack events — failure was at changeset validation, before any resource actions)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Read stack outputs
         id: stack
