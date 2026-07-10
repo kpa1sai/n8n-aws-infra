@@ -1,0 +1,97 @@
+name: Bootstrap n8n infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region to bootstrap into (must match the AWS_REGION secret you'll set for the Deploy workflow)."
+        required: true
+        default: "us-east-1"
+      allowed_branch:
+        description: 'Git ref allowed to assume the deploy role, e.g. refs/heads/main. Use "*" to allow any branch/PR.'
+        required: true
+        default: "refs/heads/main"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight — check required secrets are set
+        env:
+          AWS_BOOTSTRAP_ACCESS_KEY_ID: ${{ secrets.AWS_BOOTSTRAP_ACCESS_KEY_ID }}
+          AWS_BOOTSTRAP_SECRET_ACCESS_KEY: ${{ secrets.AWS_BOOTSTRAP_SECRET_ACCESS_KEY }}
+        run: |
+          missing=()
+          [ -z "$AWS_BOOTSTRAP_ACCESS_KEY_ID" ] && missing+=("AWS_BOOTSTRAP_ACCESS_KEY_ID")
+          [ -z "$AWS_BOOTSTRAP_SECRET_ACCESS_KEY" ] && missing+=("AWS_BOOTSTRAP_SECRET_ACCESS_KEY")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required repo secrets: ${missing[*]}"
+            echo "## Bootstrap blocked — missing secrets" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The following required secrets are not set:" >> "$GITHUB_STEP_SUMMARY"
+            for m in "${missing[@]}"; do echo "- \`$m\`" >> "$GITHUB_STEP_SUMMARY"; done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "These are a *temporary* IAM access key — see the README's one-time setup section for the minimal IAM policy to attach to it. Add them, re-run, then delete both the AWS IAM user/key and these two secrets." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "All required secrets present."
+
+      - name: Derive GitHub org/repo from this repository
+        id: repo
+        run: |
+          echo "org=${GITHUB_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (temporary bootstrap key)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_BOOTSTRAP_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_BOOTSTRAP_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Deploy bootstrap CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file bootstrap/template.yaml \
+            --stack-name n8n-bootstrap \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              GitHubOrg="${{ steps.repo.outputs.org }}" \
+              GitHubRepo="${{ steps.repo.outputs.repo }}" \
+              AllowedBranch="${{ inputs.allowed_branch }}"
+
+      - name: Read stack outputs
+        id: stack
+        run: |
+          OUTPUTS=$(aws cloudformation describe-stacks --stack-name n8n-bootstrap --query "Stacks[0].Outputs" --output json)
+          echo "role_arn=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="RoleArn") | .OutputValue')" >> "$GITHUB_OUTPUT"
+          echo "state_bucket=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="StateBucket") | .OutputValue')" >> "$GITHUB_OUTPUT"
+          echo "lock_table=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="LockTable") | .OutputValue')" >> "$GITHUB_OUTPUT"
+
+      - name: Print setup instructions
+        run: |
+          {
+            echo "## Bootstrap complete"
+            echo ""
+            echo "Add these as repo secrets (Settings → Secrets and variables → Actions), then run **Deploy n8n**:"
+            echo ""
+            echo "| Secret | Value |"
+            echo "|---|---|"
+            echo "| \`AWS_ROLE_ARN\` | \`${{ steps.stack.outputs.role_arn }}\` |"
+            echo "| \`AWS_REGION\` | \`${{ inputs.aws_region }}\` |"
+            echo "| \`TF_STATE_BUCKET\` | \`${{ steps.stack.outputs.state_bucket }}\` |"
+            echo "| \`TF_STATE_DYNAMODB_TABLE\` | \`${{ steps.stack.outputs.lock_table }}\` |"
+            echo ""
+            echo "### Now delete the temporary bootstrap credentials"
+            echo ""
+            echo "You no longer need the temporary IAM key — the Deploy/Destroy workflows use the OIDC role above instead:"
+            echo "1. In AWS: delete the access key (and the IAM user, if you created one just for this) you used to run this workflow."
+            echo "2. In GitHub: delete the \`AWS_BOOTSTRAP_ACCESS_KEY_ID\` and \`AWS_BOOTSTRAP_SECRET_ACCESS_KEY\` repo secrets."
+          } >> "$GITHUB_STEP_SUMMARY"

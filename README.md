@@ -12,17 +12,16 @@ internet. Workflow migration is a separate, later step.
 
 ## Quick Start for Forks
 
-**Prerequisites:** a GitHub account, an AWS account (free tier is enough), and
-Terraform + the AWS CLI installed locally — only for the one-time bootstrap step
-below. Everything after that runs entirely in GitHub Actions; no local tooling needed
-to deploy or manage your instance.
+**Prerequisites:** a GitHub account and an AWS account (free tier is enough). No local
+software to install — bootstrapping, deploying, and managing your instance all run
+entirely in GitHub Actions and the AWS Console, from any device.
 
 1. **Fork this repo.**
-2. **Bootstrap your own AWS account** (once, locally, with your own AWS
-   credentials) — see [One-time setup](#one-time-setup-do-this-before-the-first-pipeline-run)
-   below. This creates an IAM role that trusts *only your fork* (scoped by
-   `github_org`/`github_repo` in `bootstrap/main.tf` to your repo's OIDC subject) — it
-   cannot be assumed by anyone else's fork or workflow.
+2. **Create a temporary IAM key in AWS** and **bootstrap via GitHub Actions** — see
+   [One-time setup](#one-time-setup-do-this-before-the-first-pipeline-run) below. This
+   creates an IAM role that trusts *only your fork* (scoped to your repo's OIDC
+   subject) — it cannot be assumed by anyone else's fork or workflow. Then delete the
+   temporary key — it's not needed again.
 3. **Add the repo secrets** from the table below (Settings → Secrets and variables →
    Actions).
 4. **Run the pipeline:** Actions tab → **Deploy n8n** → Run workflow.
@@ -65,33 +64,116 @@ it proxies to n8n over the private Docker network, always over HTTPS.
 
 ```
 bootstrap/     One-time setup: state bucket, lock table, GitHub OIDC provider + IAM role.
-               Run manually, once, with your own AWS credentials. Not part of CI.
+               A CloudFormation template, applied once via the "Bootstrap n8n infra"
+               GitHub Actions workflow — not part of the regular deploy pipeline.
 terraform/     The actual infrastructure (VPC lookup, security group, keypair, EC2, EIP).
                Applied by CI on every pipeline run.
 ansible/       Configures the box: Docker, swap file, n8n/Postgres/Caddy via docker compose.
 .github/workflows/
+  bootstrap.yml One-time: creates the state bucket/lock table/OIDC role via CloudFormation.
   deploy.yml   Main pipeline: preflight checks + terraform apply + ansible-playbook + health check.
   destroy.yml  Manual, confirmation-gated teardown.
 ```
 
 ## One-time setup (do this before the first pipeline run)
 
-### 1. Bootstrap AWS (run locally, once)
+### 1. Bootstrap AWS (via GitHub Actions, once)
 
-You need AWS credentials on your own machine for this one step only — after this, CI
-never needs your keys again.
+GitHub Actions can't authenticate to a brand-new AWS account with zero credentials —
+something has to make the first API call that creates the OIDC trust. That's the one
+and only place this repo needs a real AWS key, and only temporarily:
 
-```bash
-cd bootstrap
-terraform init
-terraform apply \
-  -var="github_org=<your-github-username-or-org>" \
-  -var="github_repo=<this-repo-name>" \
-  -var="state_bucket_name=<globally-unique-bucket-name, e.g. pavan-n8n-tfstate>" \
-  -var="aws_region=us-east-1"
-```
+1. In the AWS Console, create an IAM user for one-time use, attach this minimal
+   policy (narrow on purpose — everything `Bootstrap n8n infra` needs, nothing more),
+   and generate an access key for it:
 
-Note the outputs: `role_arn`, `state_bucket`, `lock_table`. You'll need all three below.
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "CloudFormation",
+         "Effect": "Allow",
+         "Action": "cloudformation:*",
+         "Resource": "*"
+       },
+       {
+         "Sid": "OidcProvider",
+         "Effect": "Allow",
+         "Action": [
+           "iam:CreateOpenIDConnectProvider",
+           "iam:GetOpenIDConnectProvider",
+           "iam:UpdateOpenIDConnectProviderThumbprint",
+           "iam:TagOpenIDConnectProvider",
+           "iam:ListOpenIDConnectProviders",
+           "iam:DeleteOpenIDConnectProvider"
+         ],
+         "Resource": "*"
+       },
+       {
+         "Sid": "DeployRole",
+         "Effect": "Allow",
+         "Action": [
+           "iam:CreateRole",
+           "iam:GetRole",
+           "iam:DeleteRole",
+           "iam:UpdateRole",
+           "iam:UpdateAssumeRolePolicy",
+           "iam:PutRolePolicy",
+           "iam:GetRolePolicy",
+           "iam:DeleteRolePolicy",
+           "iam:ListRolePolicies",
+           "iam:ListAttachedRolePolicies",
+           "iam:TagRole"
+         ],
+         "Resource": "*"
+       },
+       {
+         "Sid": "StateBucket",
+         "Effect": "Allow",
+         "Action": [
+           "s3:CreateBucket",
+           "s3:PutBucketVersioning",
+           "s3:PutEncryptionConfiguration",
+           "s3:PutBucketPublicAccessBlock",
+           "s3:GetBucketVersioning",
+           "s3:GetEncryptionConfiguration",
+           "s3:GetBucketPublicAccessBlock",
+           "s3:GetBucketPolicy",
+           "s3:PutBucketTagging",
+           "s3:DeleteBucket"
+         ],
+         "Resource": "*"
+       },
+       {
+         "Sid": "LockTable",
+         "Effect": "Allow",
+         "Action": [
+           "dynamodb:CreateTable",
+           "dynamodb:DescribeTable",
+           "dynamodb:DeleteTable",
+           "dynamodb:TagResource"
+         ],
+         "Resource": "*"
+       }
+     ]
+   }
+   ```
+
+2. Add the key as two temporary repo secrets: `AWS_BOOTSTRAP_ACCESS_KEY_ID` and
+   `AWS_BOOTSTRAP_SECRET_ACCESS_KEY`.
+3. Actions tab → **Bootstrap n8n infra** → Run workflow. Takes under a minute.
+4. The job summary prints `AWS_ROLE_ARN`, `AWS_REGION`, `TF_STATE_BUCKET`, and
+   `TF_STATE_DYNAMODB_TABLE` — copy these into the permanent repo secrets below.
+5. **Delete the temporary credentials** — in AWS, delete the access key (and the IAM
+   user if you made one just for this); in GitHub, delete the
+   `AWS_BOOTSTRAP_ACCESS_KEY_ID`/`AWS_BOOTSTRAP_SECRET_ACCESS_KEY` secrets. Nothing
+   after this point ever needs a stored AWS key again — `deploy.yml`/`destroy.yml`
+   authenticate via the OIDC role you just created.
+
+Safe to re-run **Bootstrap n8n infra** if it fails partway or you need to change the
+allowed branch — it's a CloudFormation stack update, not a create-from-scratch, so it
+won't error on "already exists."
 
 ### 2. Add GitHub repository secrets
 
@@ -99,10 +181,10 @@ Settings → Secrets and variables → Actions → New repository secret:
 
 | Secret | Value |
 |---|---|
-| `AWS_ROLE_ARN` | `role_arn` output from bootstrap |
-| `AWS_REGION` | e.g. `us-east-1` |
-| `TF_STATE_BUCKET` | `state_bucket` output from bootstrap |
-| `TF_STATE_DYNAMODB_TABLE` | `lock_table` output from bootstrap |
+| `AWS_ROLE_ARN` | From the **Bootstrap n8n infra** job summary |
+| `AWS_REGION` | Same region you bootstrapped into, e.g. `us-east-1` — also from the job summary |
+| `TF_STATE_BUCKET` | From the **Bootstrap n8n infra** job summary |
+| `TF_STATE_DYNAMODB_TABLE` | From the **Bootstrap n8n infra** job summary |
 | `SSH_ALLOWED_CIDR` | Your IP in CIDR form, e.g. `203.0.113.5/32` (find yours at `curl ifconfig.me`). Leave unset only if you accept SSH open to the world — the pipeline will warn you if so. |
 | `N8N_OWNER_EMAIL` | Email for the n8n owner account (used to log in) |
 | `N8N_OWNER_FIRST_NAME` | First name for the owner account |
@@ -131,8 +213,10 @@ HTTPS URL (and IP) — reachable and usable from any device, anywhere.
 
 Actions tab → **Destroy n8n infra** → Run workflow → type `DESTROY` in the confirmation
 input. This tears down the EC2 instance, EIP, security group, and the SSH key secret.
-The Terraform state bucket/lock table from bootstrap are left in place (destroy them
-manually if you want to fully clean up).
+The bootstrap resources (state bucket, lock table, OIDC role — the `n8n-bootstrap`
+CloudFormation stack) are left in place; delete that stack manually in the AWS Console
+if you want to fully clean up (empty the state bucket first — it's versioned and
+retained on stack deletion by design, so CloudFormation won't delete it for you).
 
 ## Cost
 
@@ -157,12 +241,24 @@ alerts for you.
 - **SSH doesn't work:** the private key lives only in AWS Secrets Manager
   (`terraform output ssh_private_key_secret_name` in `terraform/`), not in this repo.
   Fetch it with `aws secretsmanager get-secret-value` using your own AWS credentials.
+- **`Bootstrap n8n infra` fails with `EntityAlreadyExists` on the OIDC provider:**
+  your AWS account already has a `token.actions.githubusercontent.com` OIDC provider
+  from another project (AWS allows only one per account). Edit
+  `bootstrap/template.yaml`, remove the `GithubOidcProvider` resource, and change
+  `GithubActionsDeployRole`'s trust policy `Federated` value to your existing
+  provider's ARN instead.
+- **Ran `Bootstrap n8n infra` a second time by mistake:** harmless — CloudFormation
+  updates the existing `n8n-bootstrap` stack instead of failing on duplicate
+  resources.
 
 ## Security notes
 
-- **No stored AWS keys** — GitHub Actions assumes an IAM role via OIDC, scoped (by the
-  bootstrap step) to only this repo's OIDC subject — other forks get their own,
-  mutually isolated roles.
+- **No stored AWS keys for ongoing use** — `deploy.yml`/`destroy.yml` assume an IAM
+  role via OIDC, scoped by the bootstrap stack to only this repo's OIDC subject —
+  other forks get their own, mutually isolated roles. The only AWS key that ever
+  exists is the temporary one used once by `Bootstrap n8n infra`, scoped to a minimal
+  custom policy and deleted immediately after (see
+  [One-time setup](#one-time-setup-do-this-before-the-first-pipeline-run)).
 - **SSH key never touches the repo** — Terraform generates a fresh keypair per
   environment; the private key lives only in AWS Secrets Manager and briefly in the CI
   runner's memory to hand off to Ansible.
