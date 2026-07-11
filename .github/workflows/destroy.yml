@@ -8,7 +8,6 @@ on:
         required: true
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -29,25 +28,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Locate Terraform state bucket
+        id: state
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "bucket=n8n-tf-state-${ACCOUNT_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.7.5"
+          terraform_version: "1.12.2"
 
       - name: Terraform init
         working-directory: terraform
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
             -backend-config="key=n8n-server/terraform.tfstate" \
             -backend-config="region=${{ secrets.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ secrets.TF_STATE_DYNAMODB_TABLE }}"
+            -backend-config="use_lockfile=true"
 
       - name: Terraform destroy
         working-directory: terraform
@@ -57,4 +63,9 @@ jobs:
             -var="allowed_ssh_cidr=${{ secrets.SSH_ALLOWED_CIDR != '' && secrets.SSH_ALLOWED_CIDR || '0.0.0.0/0' }}"
 
       - name: Summary
-        run: echo "## n8n infra destroyed" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          {
+            echo "## n8n infra destroyed"
+            echo ""
+            echo "The Terraform state bucket (\`${{ steps.state.outputs.bucket }}\`) is left in place so you can redeploy later. For a full cleanup, empty and delete it in the S3 console, then deactivate the IAM user's access key."
+          } >> "$GITHUB_STEP_SUMMARY"
