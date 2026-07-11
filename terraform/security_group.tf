@@ -1,6 +1,6 @@
 resource "aws_security_group" "n8n" {
   name        = "${var.project_name}-sg"
-  description = "n8n server: SSH (restricted) + HTTP/HTTPS only. n8n's own port is never exposed."
+  description = "n8n server SSH. n8ns own port is never exposed."
   vpc_id      = data.aws_vpc.default.id
 
   ingress {

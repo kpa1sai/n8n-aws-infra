@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type DESTROY (all caps) to confirm you want to tear down the EC2 instance, EIP, security group, and SSH key secret.'
+        description: 'Type DESTROY to confirm you want to tear down the EC2 instance, EIP, security group, and SSH key secret.'
         required: true
 
 permissions:

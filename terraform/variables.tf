@@ -5,7 +5,7 @@ variable "aws_region" {
 }
 
 variable "project_name" {
-  description = "Name prefix used for tagging/naming resources."
+  description = "Name prefix used for naming resources."
   type        = string
   default     = "n8n-server"
 }
@@ -17,18 +17,13 @@ variable "instance_type" {
 }
 
 variable "allowed_ssh_cidr" {
-  description = "CIDR allowed to reach port 22. Restrict this to your own IP/32 via the SSH_ALLOWED_CIDR secret."
+  description = "CIDR allowed to reach port 22. Restrict this to your own IP32 via the SSH_ALLOWED_CIDR secret."
   type        = string
   default     = "0.0.0.0/0"
 }
 
 variable "deploy_runner_cidr" {
-  description = <<-EOT
-    CIDR of the CI runner executing this deploy, also allowed on port 22 —
-    the pipeline itself connects over SSH to run Ansible, and GitHub-hosted
-    runners get a fresh IP each run. Refreshed (replaced, not accumulated)
-    on every apply. Empty = no extra CIDR (local runs).
-  EOT
+  description = "CIDR of the CI runner executing this deploy.  the pipeline itself connects over SSH to run Ansible, and GitHub-hosted runners get a fresh IP each run."
   type        = string
   default     = ""
 }
