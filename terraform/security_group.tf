@@ -4,7 +4,7 @@ resource "aws_security_group" "n8n" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "SSH (your CIDR + the current CI runner's IP)"
+    description = "SSH (your CIDR and the current CI runner's IP)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -12,7 +12,7 @@ resource "aws_security_group" "n8n" {
   }
 
   ingress {
-    description = "HTTP (Caddy - ACME challenge / redirect to HTTPS / plain mode if no domain)"
+    description = "HTTP (Caddy - ACME challenge or redirect to HTTPS or plain mode if no domain)"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
