@@ -4,11 +4,11 @@ resource "aws_security_group" "n8n" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "SSH"
+    description = "SSH (your CIDR + the current CI runner's IP)"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+    cidr_blocks = distinct(compact([var.allowed_ssh_cidr, var.deploy_runner_cidr]))
   }
 
   ingress {

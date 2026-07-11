@@ -120,7 +120,7 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `AWS_ACCESS_KEY_ID` | The access key ID from step 1 |
 | `AWS_SECRET_ACCESS_KEY` | The secret access key from step 1 |
 | `AWS_REGION` | Region to deploy into, e.g. `us-east-1` |
-| `SSH_ALLOWED_CIDR` | Your IP in CIDR form, e.g. `203.0.113.5/32` (find yours at `curl ifconfig.me`). Leave unset only if you accept SSH open to the world — the pipeline will warn you if so. |
+| `SSH_ALLOWED_CIDR` | Your IP in CIDR form, e.g. `203.0.113.5/32` (find yours at `curl ifconfig.me`). The pipeline additionally allows the GitHub runner's own IP on port 22 during each run (it needs SSH to run Ansible), refreshed on every deploy. Leave unset only if you accept SSH open to the world — the pipeline will warn you if so. |
 | `N8N_OWNER_EMAIL` | Email for the n8n owner account (used to log in) |
 | `N8N_OWNER_FIRST_NAME` | First name for the owner account |
 | `N8N_OWNER_LAST_NAME` | Last name for the owner account |
@@ -190,6 +190,9 @@ alerts for you.
   runner's memory to hand off to Ansible.
 - **IMDSv2 enforced, root volume encrypted**, security group only opens 22 (restrict
   via `SSH_ALLOWED_CIDR`), 80, and 443 — n8n's port 5678 is never exposed publicly.
+  Port 22 also admits the CI runner's IP (SSH is how Ansible configures the box);
+  each deploy replaces the previous runner IP with the current one, and the instance
+  only accepts key auth, so a stale runner CIDR is not a practical exposure.
 - **n8n's owner account is preset from environment variables** — the password is
   bcrypt-hashed in CI, so plaintext is never written to disk or logged, and there's no
   window where the instance is reachable but unclaimed.

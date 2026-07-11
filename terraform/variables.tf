@@ -22,6 +22,17 @@ variable "allowed_ssh_cidr" {
   default     = "0.0.0.0/0"
 }
 
+variable "deploy_runner_cidr" {
+  description = <<-EOT
+    CIDR of the CI runner executing this deploy, also allowed on port 22 —
+    the pipeline itself connects over SSH to run Ansible, and GitHub-hosted
+    runners get a fresh IP each run. Refreshed (replaced, not accumulated)
+    on every apply. Empty = no extra CIDR (local runs).
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "root_volume_size" {
   description = "Root EBS volume size in GB."
   type        = number

@@ -101,6 +101,9 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.12.2"
+          # The wrapper pollutes stdout, corrupting $(terraform output -raw …)
+          # captures in later steps — and we don't use its step outputs.
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: terraform
@@ -111,12 +114,23 @@ jobs:
             -backend-config="region=${{ secrets.AWS_REGION }}" \
             -backend-config="use_lockfile=true"
 
+      - name: Detect runner public IP (must be allowed on port 22 for Ansible)
+        id: runner_ip
+        run: |
+          IP=$(curl -sS --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]')
+          if ! echo "$IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not determine the runner's public IP (got: '$IP')."
+            exit 1
+          fi
+          echo "cidr=${IP}/32" >> "$GITHUB_OUTPUT"
+
       - name: Terraform plan
         working-directory: terraform
         run: |
           terraform plan -out=tfplan \
             -var="aws_region=${{ secrets.AWS_REGION }}" \
-            -var="allowed_ssh_cidr=${{ secrets.SSH_ALLOWED_CIDR != '' && secrets.SSH_ALLOWED_CIDR || '0.0.0.0/0' }}"
+            -var="allowed_ssh_cidr=${{ secrets.SSH_ALLOWED_CIDR != '' && secrets.SSH_ALLOWED_CIDR || '0.0.0.0/0' }}" \
+            -var="deploy_runner_cidr=${{ steps.runner_ip.outputs.cidr }}"
 
       - name: Terraform apply
         working-directory: terraform
@@ -153,11 +167,13 @@ jobs:
           for i in $(seq 1 30); do
             if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/n8n_key.pem ubuntu@"$IP" 'echo ready' 2>/dev/null; then
               echo "SSH is up"
-              break
+              exit 0
             fi
             echo "Waiting for SSH... ($i/30)"
             sleep 10
           done
+          echo "::error::SSH to $IP never became reachable after 30 attempts. Check the EC2 instance's state and the security group's port-22 rules in the AWS console."
+          exit 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -181,7 +197,7 @@ jobs:
       - name: Generate inventory
         working-directory: ansible
         run: |
-          cat > inventory.ini <<EOF
+          cat > inventory.ini <<'EOF'
           [n8n]
           n8n-server ansible_host=${{ steps.tf.outputs.public_ip }} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/n8n_key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'
           EOF
@@ -190,7 +206,10 @@ jobs:
         working-directory: ansible
         run: |
           umask 077
-          cat > extra-vars.yml <<EOF
+          # Quoted delimiter: values are filled in by GitHub Actions template
+          # expansion, and bash must NOT re-expand them — bcrypt hashes ($2b$12$…)
+          # and passwords containing $ would be silently mangled otherwise.
+          cat > extra-vars.yml <<'EOF'
           public_ip: "${{ steps.tf.outputs.public_ip }}"
           n8n_domain: "${{ secrets.N8N_DOMAIN }}"
           n8n_owner_email: "${{ secrets.N8N_OWNER_EMAIL }}"

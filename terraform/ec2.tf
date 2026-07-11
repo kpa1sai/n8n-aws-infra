@@ -28,9 +28,16 @@ resource "aws_instance" "n8n" {
 
   root_block_device {
     volume_size           = var.root_volume_size
-    volume_type            = "gp3"
-    encrypted              = true
-    delete_on_termination  = true
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = true
+  }
+
+  # Without this, every new Canonical AMI release would make the next apply
+  # destroy and recreate the instance — wiping the Docker volumes that hold
+  # n8n workflows and the Postgres data. The AMI is only read at first create.
+  lifecycle {
+    ignore_changes = [ami]
   }
 
   tags = {
